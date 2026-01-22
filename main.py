@@ -1,9 +1,11 @@
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from ytmusicapi.ytmusic import YTMusic
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import subprocess
 import json
+import httpx
 
 app = FastAPI(title="YTMusic API", docs_url="/docs")
 
@@ -103,11 +105,44 @@ def get_song(video_id: str):
                 streams = future.result()
         details = song.get("videoDetails", {})
         thumbnails = details.get("thumbnail", {}).get("thumbnails", [])
+        stream_url = f"/stream/{video_id}"
         return {"success": True, "data": {
             "id": video_id, "title": details.get("title"), "artist": details.get("author"),
             "duration": int(details.get("lengthSeconds", 0)), "cover": get_best_thumbnail(thumbnails),
-            "views": details.get("viewCount"), "streams": streams
+            "views": details.get("viewCount"), "stream_url": stream_url, "streams": streams
         }}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/stream/{video_id}")
+async def stream_audio(video_id: str, quality: str = Query("best")):
+    try:
+        streams = get_audio_urls(video_id)
+        if not streams:
+            raise HTTPException(status_code=404, detail="No audio streams found")
+        
+        if quality == "low":
+            stream = streams[-1]
+        elif quality == "medium" and len(streams) > 1:
+            stream = streams[1]
+        else:
+            stream = streams[0]
+        
+        audio_url = stream["url"]
+        
+        async def stream_generator():
+            async with httpx.AsyncClient(timeout=300) as client:
+                async with client.stream("GET", audio_url) as resp:
+                    async for chunk in resp.aiter_bytes(chunk_size=65536):
+                        yield chunk
+        
+        content_type = "audio/webm" if stream["format"] == "webm" else "audio/mp4"
+        return StreamingResponse(stream_generator(), media_type=content_type, headers={
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-cache"
+        })
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
