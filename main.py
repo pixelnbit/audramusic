@@ -27,7 +27,25 @@ def get_audio_urls(video_id: str) -> list:
     if video_id in stream_cache and cache_expiry.get(video_id, 0) > time.time():
         return stream_cache[video_id]
     try:
-        cmd = ["yt-dlp", "-f", "bestaudio", "-j", "--no-warnings", "--no-playlist", "--no-check-certificates", "--extractor-args", "youtube:player_client=android", f"https://music.youtube.com/watch?v={video_id}"]
+        from pytubefix import YouTube
+        yt_video = YouTube(f"https://music.youtube.com/watch?v={video_id}", use_po_token=False)
+        streams = yt_video.streams.filter(only_audio=True).order_by("abr").desc()
+        formats = []
+        for s in streams[:3]:
+            formats.append({
+                "url": s.url,
+                "format": s.subtype or "m4a",
+                "bitrate": int(s.abr.replace("kbps", "")) if s.abr else 128,
+                "codec": s.audio_codec or "mp4a"
+            })
+        if formats:
+            stream_cache[video_id] = formats
+            cache_expiry[video_id] = time.time() + 18000
+        return formats
+    except Exception as e:
+        print(f"pytubefix error: {e}")
+    try:
+        cmd = ["yt-dlp", "-f", "bestaudio", "-j", "--no-warnings", "--no-playlist", f"https://music.youtube.com/watch?v={video_id}"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         if result.returncode == 0:
             data = json.loads(result.stdout)
@@ -42,7 +60,7 @@ def get_audio_urls(video_id: str) -> list:
                 cache_expiry[video_id] = time.time() + 18000
             return result_formats
     except Exception as e:
-        print(f"yt-dlp error: {e}")
+        print(f"yt-dlp fallback error: {e}")
     return []
 
 def get_best_thumbnail(thumbnails: list) -> str:
