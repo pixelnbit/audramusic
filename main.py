@@ -79,9 +79,19 @@ def get_best_thumbnail(thumbnails: list) -> str:
         return None
     best = max(thumbnails, key=lambda x: x.get("width", 0) * x.get("height", 0))
     url = best.get("url", "")
-    if "ytimg.com" in url and "/vi/" in url:
-        vid_id = url.split("/vi/")[1].split("/")[0]
-        return f"https://i.ytimg.com/vi/{vid_id}/maxresdefault.jpg"
+    if "ytimg.com" in url:
+        if "/vi/" in url:
+            vid_id = url.split("/vi/")[1].split("/")[0]
+        elif "i.ytimg.com" in url:
+            vid_id = url.split("/")[-2] if url.count("/") > 3 else None
+        else:
+            vid_id = None
+        if vid_id:
+            return f"https://img.youtube.com/vi/{vid_id}/maxresdefault.jpg"
+    if "lh3.googleusercontent.com" in url:
+        return url.split("=")[0] + "=w800-h800-l90-rj"
+    if "yt3.ggpht.com" in url or "yt3.googleusercontent.com" in url:
+        return url.split("=")[0] + "=s800-c-k-c0x00ffffff-no-rj"
     return url
 
 def format_track(track: dict) -> dict:
@@ -98,9 +108,44 @@ def format_track(track: dict) -> dict:
         "isExplicit": track.get("isExplicit", False)
     }
 
+async def get_country_from_ip(request) -> str:
+    try:
+        forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        client_ip = forwarded or request.client.host
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"http://ip-api.com/json/{client_ip}?fields=countryCode")
+            if resp.status_code == 200:
+                return resp.json().get("countryCode", "US")
+    except:
+        pass
+    return "US"
+
 @app.get("/")
 def root():
     return {"status": "ok", "service": "YTMusic API"}
+
+@app.get("/locale")
+async def get_locale(request: Request):
+    country = await get_country_from_ip(request)
+    return {"success": True, "data": {"country": country}}
+
+@app.get("/explore")
+async def get_explore(request: Request, country: str = Query(None)):
+    try:
+        if not country:
+            country = await get_country_from_ip(request)
+        charts = yt.get_charts(country)
+        moods = yt.get_mood_categories()
+        return {"success": True, "data": {
+            "country": country,
+            "trending": charts.get("trending", {}).get("items", [])[:20],
+            "top_songs": charts.get("songs", {}).get("items", [])[:20] if charts.get("songs") else [],
+            "top_videos": charts.get("videos", {}).get("items", [])[:20] if charts.get("videos") else [],
+            "top_artists": charts.get("artists", {}).get("items", [])[:20] if charts.get("artists") else [],
+            "moods": moods
+        }}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/search")
 def search(query: str = Query(...), filter: str = Query(None), limit: int = Query(20), ignore_spelling: bool = Query(False)):
