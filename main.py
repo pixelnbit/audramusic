@@ -7,8 +7,6 @@ import subprocess
 import json
 import httpx
 import time
-from functools import lru_cache
-from cachetools import TTLCache
 
 app = FastAPI(title="YTMusic API", docs_url="/docs")
 
@@ -22,10 +20,11 @@ app.add_middleware(
 
 yt = YTMusic()
 executor = ThreadPoolExecutor(max_workers=100)
-stream_cache = TTLCache(maxsize=1000, ttl=18000)
+stream_cache = {}
+cache_expiry = {}
 
 def get_audio_urls(video_id: str) -> list:
-    if video_id in stream_cache:
+    if video_id in stream_cache and cache_expiry.get(video_id, 0) > time.time():
         return stream_cache[video_id]
     try:
         cmd = ["yt-dlp", "-f", "bestaudio", "-j", "--no-warnings", "--no-playlist", "--no-check-certificates", "--extractor-args", "youtube:player_client=android", f"https://music.youtube.com/watch?v={video_id}"]
@@ -40,6 +39,7 @@ def get_audio_urls(video_id: str) -> list:
             result_formats = formats[:3]
             if result_formats:
                 stream_cache[video_id] = result_formats
+                cache_expiry[video_id] = time.time() + 18000
             return result_formats
     except Exception as e:
         print(f"yt-dlp error: {e}")
