@@ -117,12 +117,23 @@ async def get_explore(request: Request, country: str = Query(None)):
             country = await get_country_from_ip(request)
         charts = yt.get_charts(country)
         moods = yt.get_mood_categories()
+        
+        if isinstance(charts, list):
+            return {"success": True, "data": {
+                "country": country,
+                "trending": charts[:20] if charts else [],
+                "top_songs": [],
+                "top_videos": [],
+                "top_artists": [],
+                "moods": moods
+            }}
+        
         return {"success": True, "data": {
             "country": country,
-            "trending": charts.get("trending", {}).get("items", [])[:20],
-            "top_songs": charts.get("songs", {}).get("items", [])[:20] if charts.get("songs") else [],
-            "top_videos": charts.get("videos", {}).get("items", [])[:20] if charts.get("videos") else [],
-            "top_artists": charts.get("artists", {}).get("items", [])[:20] if charts.get("artists") else [],
+            "trending": charts.get("trending", {}).get("items", [])[:20] if isinstance(charts.get("trending"), dict) else [],
+            "top_songs": charts.get("songs", {}).get("items", [])[:20] if isinstance(charts.get("songs"), dict) else [],
+            "top_videos": charts.get("videos", {}).get("items", [])[:20] if isinstance(charts.get("videos"), dict) else [],
+            "top_artists": charts.get("artists", {}).get("items", [])[:20] if isinstance(charts.get("artists"), dict) else [],
             "moods": moods
         }}
     except Exception as e:
