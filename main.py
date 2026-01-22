@@ -1,11 +1,14 @@
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse
 from ytmusicapi.ytmusic import YTMusic
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import subprocess
 import json
 import httpx
+import time
+from functools import lru_cache
+from cachetools import TTLCache
 
 app = FastAPI(title="YTMusic API", docs_url="/docs")
 
@@ -19,11 +22,14 @@ app.add_middleware(
 
 yt = YTMusic()
 executor = ThreadPoolExecutor(max_workers=100)
+stream_cache = TTLCache(maxsize=1000, ttl=18000)
 
 def get_audio_urls(video_id: str) -> list:
+    if video_id in stream_cache:
+        return stream_cache[video_id]
     try:
-        cmd = ["yt-dlp", "-f", "bestaudio", "-j", "--no-warnings", "--no-playlist", f"https://music.youtube.com/watch?v={video_id}"]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        cmd = ["yt-dlp", "-f", "bestaudio", "-j", "--no-warnings", "--no-playlist", "--no-check-certificates", "--extractor-args", "youtube:player_client=android", f"https://music.youtube.com/watch?v={video_id}"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         if result.returncode == 0:
             data = json.loads(result.stdout)
             formats = []
@@ -31,9 +37,12 @@ def get_audio_urls(video_id: str) -> list:
                 if f.get("acodec") != "none" and f.get("vcodec") == "none":
                     formats.append({"url": f.get("url"), "format": f.get("ext"), "bitrate": f.get("abr", 0), "codec": f.get("acodec")})
             formats.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
-            return formats[:3]
-    except:
-        pass
+            result_formats = formats[:3]
+            if result_formats:
+                stream_cache[video_id] = result_formats
+            return result_formats
+    except Exception as e:
+        print(f"yt-dlp error: {e}")
     return []
 
 def get_best_thumbnail(thumbnails: list) -> str:
@@ -62,13 +71,8 @@ def format_track(track: dict) -> dict:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "YTMusic API", "endpoints": [
-        "/search", "/search/suggestions", "/home", "/song/{id}", "/artist/{id}", "/artist/{id}/albums",
-        "/album/{id}", "/album/{id}/browse", "/playlist/{id}", "/charts", "/moods", "/moods/{params}",
-        "/genres", "/new_releases", "/radio/{id}", "/lyrics/{id}", "/related/{id}", "/user/{id}", "/tasteprofile"
-    ]}
+    return {"status": "ok", "service": "YTMusic API"}
 
-# ============ SEARCH ============
 @app.get("/search")
 def search(query: str = Query(...), filter: str = Query(None), limit: int = Query(20), ignore_spelling: bool = Query(False)):
     try:
@@ -85,7 +89,6 @@ def search_suggestions(query: str = Query(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ============ BROWSING ============
 @app.get("/home")
 def get_home(limit: int = Query(6)):
     try:
@@ -105,11 +108,10 @@ def get_song(video_id: str):
                 streams = future.result()
         details = song.get("videoDetails", {})
         thumbnails = details.get("thumbnail", {}).get("thumbnails", [])
-        stream_url = f"/stream/{video_id}"
         return {"success": True, "data": {
             "id": video_id, "title": details.get("title"), "artist": details.get("author"),
             "duration": int(details.get("lengthSeconds", 0)), "cover": get_best_thumbnail(thumbnails),
-            "views": details.get("viewCount"), "stream_url": stream_url, "streams": streams
+            "views": details.get("viewCount"), "stream_url": f"/stream/{video_id}", "streams": streams
         }}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -121,25 +123,18 @@ async def stream_audio(video_id: str, quality: str = Query("best")):
         if not streams:
             raise HTTPException(status_code=404, detail="No audio streams found")
         
-        if quality == "low":
-            stream = streams[-1]
-        elif quality == "medium" and len(streams) > 1:
-            stream = streams[1]
-        else:
-            stream = streams[0]
-        
+        stream = streams[-1] if quality == "low" else (streams[1] if quality == "medium" and len(streams) > 1 else streams[0])
         audio_url = stream["url"]
         
         async def stream_generator():
-            async with httpx.AsyncClient(timeout=300) as client:
-                async with client.stream("GET", audio_url) as resp:
-                    async for chunk in resp.aiter_bytes(chunk_size=65536):
+            async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=10)) as client:
+                async with client.stream("GET", audio_url, headers={"Range": "bytes=0-"}) as resp:
+                    async for chunk in resp.aiter_bytes(chunk_size=131072):
                         yield chunk
         
         content_type = "audio/webm" if stream["format"] == "webm" else "audio/mp4"
         return StreamingResponse(stream_generator(), media_type=content_type, headers={
-            "Accept-Ranges": "bytes",
-            "Cache-Control": "no-cache"
+            "Accept-Ranges": "bytes", "Cache-Control": "public, max-age=3600", "Content-Type": content_type
         })
     except HTTPException:
         raise
@@ -198,7 +193,6 @@ def get_album_browse(album_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ============ EXPLORE ============
 @app.get("/charts")
 def get_charts(country: str = Query("ZZ")):
     try:
@@ -242,7 +236,6 @@ def get_tasteprofile():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ============ PLAYLISTS ============
 @app.get("/playlist/{playlist_id}")
 def get_playlist(playlist_id: str, limit: int = Query(100)):
     try:
@@ -262,7 +255,6 @@ def get_playlist_suggestions(playlist_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ============ WATCH / RADIO ============
 @app.get("/radio/{video_id}")
 def get_radio(video_id: str, limit: int = Query(25)):
     try:
@@ -281,7 +273,6 @@ def get_related(video_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ============ LYRICS ============
 @app.get("/lyrics/{video_id}")
 def get_lyrics(video_id: str):
     try:
@@ -292,7 +283,6 @@ def get_lyrics(video_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ============ USER ============
 @app.get("/user/{channel_id}")
 def get_user(channel_id: str):
     try:
@@ -310,7 +300,6 @@ def get_user_playlists(channel_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ============ PODCASTS ============
 @app.get("/podcast/{podcast_id}")
 def get_podcast(podcast_id: str):
     try:
