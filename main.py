@@ -28,25 +28,6 @@ def get_audio_urls(video_id: str) -> list:
         return stream_cache[video_id]
     
     try:
-        from pytube import YouTube
-        yt_video = YouTube(f"https://www.youtube.com/watch?v={video_id}")
-        streams = yt_video.streams.filter(only_audio=True).order_by("abr").desc()
-        formats = []
-        for s in streams[:3]:
-            formats.append({
-                "url": s.url,
-                "format": s.subtype or "m4a",
-                "bitrate": int(s.abr.replace("kbps", "")) if s.abr else 128,
-                "codec": s.audio_codec or "mp4a"
-            })
-        if formats:
-            stream_cache[video_id] = formats
-            cache_expiry[video_id] = time.time() + 18000
-        return formats
-    except Exception as e:
-        print(f"pytube error: {e}")
-    
-    try:
         cmd = [
             "yt-dlp",
             "--no-playlist",
