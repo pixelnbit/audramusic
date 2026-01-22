@@ -3,3 +3,4 @@ uvicorn
 httpx
 ytmusicapi
 boto3
+youtube_dl
